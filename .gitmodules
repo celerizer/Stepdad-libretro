@@ -1,0 +1,6 @@
+[submodule "libh8300h"]
+	path = libh8300h
+	url = http://github.com/celerizer/libh8300h
+[submodule "libretro-common"]
+	path = libretro-common
+	url = http://github.com/libretro/libretro-common
