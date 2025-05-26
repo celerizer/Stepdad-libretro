@@ -3,19 +3,30 @@
 #include <string/stdstring.h>
 
 #include "libh8300h/devices/buttons.h"
+#include "libh8300h/devices/eeprom.h"
 #include "libh8300h/devices/lcd.h"
+#include "libh8300h/devices/led.h"
 #include "libh8300h/system.h"
 
-static h8_system_t lr_system;
+typedef struct
+{
+  h8_system_t system;
+  h8_lcd_t *lcd;
+  h8_buttons_t *buttons;
+  h8_device_t *eeprom;
+  h8_device_t *led;
 
-static h8_u16 screen_buffer[96 * 64];
-static char system_dir[1024];
+  h8_u16 screen_buffer[96 * 64];
+
+  char system_dir[1024];
+} lr_stepdad_ctx_t;
+
+static lr_stepdad_ctx_t ctx;
 
 /* libretro video options */
-static h8_u8 (*lr_video_draw)(h8_u8 *vram, h8_u16 *buffer);
-static h8_u16 lr_video_width = 96;
-static h8_u16 lr_video_height = 64;
-static float lr_video_aspect = 96.0 / 64.0;
+static const h8_u16 lr_video_width = 96;
+static const h8_u16 lr_video_height = 64;
+static const float lr_video_aspect = 96.0 / 64.0;
 
 /* libretro callbacks */
 static retro_audio_sample_t audio_cb;
@@ -33,9 +44,9 @@ static h8_device_t *h8lr_find_device(unsigned type)
 {
   unsigned i;
 
-  for (i = 0; i < lr_system.device_count; i++)
-    if (lr_system.devices[i].type == type)
-      return &lr_system.devices[i];
+  for (i = 0; i < ctx.system.device_count; i++)
+    if (ctx.system.devices[i].type == type)
+      return &ctx.system.devices[i];
 
   return NULL;
 }
@@ -94,9 +105,30 @@ bool retro_load_game(const struct retro_game_info *info)
 {
   if (info && info->data && info->size)
   {
-    memcpy(lr_system.vmem.raw, info->data, info->size);
-    h8_init(&lr_system);
-    h8_system_init(&lr_system, H8_SYSTEM_NTR_032);
+    h8_device_t *device;
+
+    memcpy(ctx.system.vmem.raw, info->data, info->size);
+    h8_init(&ctx.system);
+    h8_system_init(&ctx.system, H8_SYSTEM_NTR_032);
+
+    device = h8lr_find_device(H8_DEVICE_LCD);
+    if (device)
+      ctx.lcd = (h8_lcd_t*)device->device;
+
+    device = h8lr_find_device(H8_DEVICE_3BUTTON);
+    if (!device)
+      device = h8lr_find_device(H8_DEVICE_1BUTTON);
+    if (device)
+      ctx.buttons = (h8_buttons_t*)device->device;
+
+    device = h8lr_find_device(H8_DEVICE_EEPROM_64K);
+    if (!device)
+      device = h8lr_find_device(H8_DEVICE_EEPROM_8K);
+    if (device)
+      ctx.eeprom = device;
+      
+    ctx.led = h8lr_find_device(H8_DEVICE_LED);
+
     return true;
   }
 
@@ -122,34 +154,31 @@ static h8_u16 h8lr_colors[4] =
 
 void retro_run(void)
 {
-  h8_device_t *screen = h8lr_find_device(H8_DEVICE_LCD);
   unsigned i;
 
   handle_input();
 
   for (i = 0; i < 2000; i++)
-    h8_step(&lr_system);
+    h8_step(&ctx.system);
 
-  if (screen)
+  if (ctx.lcd)
   {
-    h8_lcd_t *lcd = (h8_lcd_t*)screen->device;
-
     for (int y = 0; y < 64; y++)
     {
       for (int x = 0; x < 96; x++)
       {
-        int yo  = y + lcd->start_line;
+        int yo  = y + ctx.lcd->start_line;
         int pg  = (yo / 8) % 21;
         int b   = yo % 8;
         int col = x;
-        h8_u16 byte = (lcd->vram[pg*0x100 + col*2] << 8) | lcd->vram[pg*0x100 + col*2+1];
+        h8_u16 byte = (ctx.lcd->vram[pg*0x100 + col*2] << 8) | ctx.lcd->vram[pg*0x100 + col*2+1];
         byte >>= b;
         uint8_t color = ((byte & 0x100) >> 7) | (byte & 1);
 
-        screen_buffer[y * 96 + x] = h8lr_colors[color];
+        ctx.screen_buffer[y * 96 + x] = h8lr_colors[color];
       }
     }
-    video_cb(screen_buffer, lr_video_width, lr_video_height, lr_video_width * 2);
+    video_cb(ctx.screen_buffer, lr_video_width, lr_video_height, lr_video_width * 2);
   }
 }
 
@@ -157,9 +186,9 @@ void retro_get_system_info(struct retro_system_info *info)
 {
   memset(info, 0, sizeof(*info));
   info->library_name = "Stepdad";
-  info->library_version = "GIT_VERSION";
+  info->library_version = GIT_VERSION;
   info->need_fullpath = false;
-  info->valid_extensions = "rom|bin";
+  info->valid_extensions = "rom|bin|payload";
   info->block_extract = false;
 }
 
@@ -267,9 +296,17 @@ void *retro_get_memory_data(unsigned type)
   switch (type)
   {
   case RETRO_MEMORY_SYSTEM_RAM:
-    return lr_system.vmem.raw;
+    return ctx.system.vmem.raw;
   case RETRO_MEMORY_SAVE_RAM:
-    return lr_system.devices[2].data;
+    if (ctx.eeprom)
+      return ctx.eeprom->data;
+    else
+      return NULL;
+  case RETRO_MEMORY_VIDEO_RAM:
+    if (ctx.lcd)
+      return ctx.lcd->vram;
+    else
+      return NULL;
   default:
     return NULL;
   }
@@ -282,7 +319,15 @@ size_t retro_get_memory_size(unsigned type)
   case RETRO_MEMORY_SYSTEM_RAM:
     return 0x10000;
   case RETRO_MEMORY_SAVE_RAM:
-    return lr_system.devices[2].size;
+    if (ctx.eeprom)
+      return ctx.eeprom->size;
+    else
+      return 0;
+  case RETRO_MEMORY_VIDEO_RAM:
+    if (ctx.lcd)
+      return sizeof(ctx.lcd->vram);
+    else
+      return 0;
   default:
     return 0;
   }
