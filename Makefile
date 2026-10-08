@@ -490,7 +490,7 @@ else
    CC = gcc
    CXX = g++
    SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
-   LDFLAGS += -static-libgcc -static-libstdc++ -lwinmm
+   LDFLAGS += -static-libgcc -static-libstdc++ -lwinmm -lws2_32
 endif
 
 include Makefile.common
